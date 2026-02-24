@@ -13,12 +13,33 @@ export class LocksService {
     const device = await this.prisma.device.findUnique({ where: { imei } });
     if (!device) throw new NotFoundException('Device not found');
 
-    await this.prisma.$transaction([
-      this.prisma.device.update({ where: { imei }, data: { isLocked: stage > 0, currentLockStage: stage } }),
-      this.prisma.lockHistory.create({ data: { deviceImei: imei, stage, reason } })
-    ]);
+    await this.prisma.$transaction(async (tx) => {
+      await tx.device.update({
+        where: { imei },
+        data: { isLocked: stage > 0, currentLockStage: stage }
+      });
 
-    if (device.fcmToken) await this.notifications.sendLockCommand(device.fcmToken, imei, stage, reason);
+      if (stage > 0) {
+        await tx.lockHistory.create({ data: { deviceImei: imei, stage, reason } });
+      } else {
+        const activeLock = await tx.lockHistory.findFirst({
+          where: { deviceImei: imei, unlockedAt: null },
+          orderBy: { lockedAt: 'desc' }
+        });
+
+        if (activeLock) {
+          await tx.lockHistory.update({
+            where: { id: activeLock.id },
+            data: { unlockedAt: new Date(), unlockedBy: 'system', metadata: { reason } }
+          });
+        }
+      }
+    });
+
+    if (device.fcmToken) {
+      await this.notifications.sendLockCommand(device.fcmToken, imei, stage, reason);
+    }
+
     return { success: true, imei, stage };
   }
 
